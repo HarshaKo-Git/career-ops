@@ -1,0 +1,8 @@
+{
+  "$schema": "https://opencode.ai/schema.json",
+  "skills": {
+    "career-ops": {
+      "path": ".opencode/skills/career-ops/SKILL.md"
+    }
+  }
+}

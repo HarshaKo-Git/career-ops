@@ -127,11 +127,12 @@ export function normalizeListing(anchors, finalUrl, max = DEFAULT_LISTING_MAX) {
  * @param {string[]} argv - process.argv.slice(2)
  */
 export function parseArgs(argv) {
-  const FLAGS = new Set(['--mode', '--max', '--timeout']);
+  const FLAGS = new Set(['--mode', '--max', '--timeout', '--pages']);
   let url;
   let mode = 'jd';
   let max = DEFAULT_LISTING_MAX;
   let timeout = DEFAULT_TIMEOUT_MS;
+  let pages = 1;
   for (let i = 0; i < argv.length; i++) {
     const tok = argv[i];
     if (FLAGS.has(tok)) {
@@ -140,11 +141,12 @@ export function parseArgs(argv) {
       if (tok === '--mode' && val != null) mode = val;
       else if (tok === '--max' && Number.isInteger(n) && n >= 0) max = n;
       else if (tok === '--timeout' && Number.isInteger(n) && n > 0) timeout = n;
+      else if (tok === '--pages' && Number.isInteger(n) && n >= 1) pages = n;
     } else if (!tok.startsWith('--') && url === undefined) {
       url = tok;
     }
   }
-  return { url, mode, max, timeout };
+  return { url, mode, max, timeout, pages };
 }
 
 // Read the raw DOM inside the page: title, main visible text, and visible
@@ -177,10 +179,10 @@ async function readDom(page) {
 }
 
 async function main() {
-  const { url, mode, max, timeout } = parseArgs(process.argv.slice(2));
+  const { url, mode, max, timeout, pages } = parseArgs(process.argv.slice(2));
 
   if (!url) {
-    console.error(JSON.stringify({ error: 'usage: browser-extract.mjs <url> [--mode jd|listing] [--max N]', code: 'no_url' }));
+    console.error(JSON.stringify({ error: 'usage: browser-extract.mjs <url> [--mode jd|listing] [--max N] [--pages N]', code: 'no_url' }));
     process.exit(1);
   }
   if (mode !== 'jd' && mode !== 'listing') {
@@ -206,32 +208,62 @@ async function main() {
   try {
     browser = await chromium.launch({ headless: true });
     const context = await browser.newContext(LIVENESS_CONTEXT_OPTIONS);
-    // Block every request (main navigation, redirect hop, or subresource) to a
-    // private/loopback/link-local or non-http(s) host. Guarding only the initial
-    // URL isn't enough once we return page CONTENT: a server-side redirect could
-    // otherwise steer the browser at internal infrastructure (SSRF).
     await context.route('**/*', (route) => {
       if (rejectPrivateOrInvalid(route.request().url())) return route.abort('blockedbyclient');
       return route.continue();
     });
-    const page = await context.newPage();
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout });
-    await page.waitForTimeout(HYDRATION_WAIT_MS); // let SPAs hydrate
-
-    // Belt-and-suspenders: never emit content read from a private final URL.
-    const finalUrl = page.url();
-    const finalGuard = rejectPrivateOrInvalid(finalUrl);
-    if (finalGuard) {
-      console.error(JSON.stringify({ error: `blocked final URL: ${finalGuard.reason}`, code: finalGuard.code }));
-      process.exitCode = 1;
-      return;
+    
+    const allJobs = [];
+    const seenUrls = new Set();
+    const isLinkedIn = url.includes('linkedin.com');
+    
+    for (let pageNum = 0; pageNum < pages; pageNum++) {
+      const page = await context.newPage();
+      
+      // Build paginated URL for LinkedIn
+      let pageUrl = url;
+      if (isLinkedIn && pageNum > 0) {
+        const urlObj = new URL(url);
+        urlObj.searchParams.set('start', String(pageNum * 25));
+        pageUrl = urlObj.href;
+      }
+      
+      await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout });
+      await page.waitForTimeout(HYDRATION_WAIT_MS);
+      
+      const finalUrl = page.url();
+      const finalGuard = rejectPrivateOrInvalid(finalUrl);
+      if (finalGuard) {
+        console.error(JSON.stringify({ error: `blocked final URL: ${finalGuard.reason}`, code: finalGuard.code }));
+        process.exitCode = 1;
+        return;
+      }
+      
+      const raw = await readDom(page);
+      
+      if (mode === 'listing') {
+        const result = normalizeListing(raw.anchors, finalUrl, max);
+        for (const job of result.jobs) {
+          if (!seenUrls.has(job.url)) {
+            seenUrls.add(job.url);
+            allJobs.push(job);
+          }
+        }
+      } else {
+        // For JD mode, just return the first page result
+        const result = normalizeJd(raw, finalUrl);
+        process.stdout.write(JSON.stringify(result));
+        await page.close();
+        return;
+      }
+      
+      await page.close();
+      
+      // Stop if we have enough jobs
+      if (allJobs.length >= max) break;
     }
-    const raw = await readDom(page);
-
-    const result = mode === 'listing'
-      ? normalizeListing(raw.anchors, finalUrl, max)
-      : normalizeJd(raw, finalUrl);
-    process.stdout.write(JSON.stringify(result));
+    
+    process.stdout.write(JSON.stringify({ url, jobs: allJobs.slice(0, max) }));
   } catch (err) {
     console.error(JSON.stringify({ error: `navigation error: ${String(err.message).split('\n')[0]}`, code: 'navigation_error' }));
     process.exitCode = 1;

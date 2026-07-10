@@ -151,11 +151,38 @@ The `search_queries` with `site:` filters cover portals transversally (all Ashby
 
 > **Caution — Level-3 hits can be weeks stale.** WebSearch is fed by a search index that lags the live board, so a result can describe a posting that has already closed. Treat every Level-3 hit as unverified: before adding it to `data/pipeline.md` or evaluating it, confirm liveness against the real posting (`node check-liveness.mjs <url>` for ATS-hosted pages, or Playwright for non-ATS pages). Unlike the real-time ATS responses in Level 2, a Level-3 snippet is never proof a role is still open.
 
+### Level 3b — LinkedIn Playwright (REAL-TIME)
+
+LinkedIn blocks WebSearch scraping, so use `browser-extract.mjs` with `--mode listing` to scrape LinkedIn job search pages directly. This gives real-time, fresh results.
+
+**Configuration in `search_queries`:**
+```yaml
+- name: LinkedIn Playwright — Technical Project Manager
+  query: 'linkedin'
+  method: playwright
+  playwright_url: 'https://www.linkedin.com/jobs/search/?keywords=Technical%20Project%20Manager&location=United%20States&f_WT=2&sortBy=R'
+  enabled: true
+```
+
+**Execution:**
+```bash
+node browser-extract.mjs "<playwright_url>" --mode listing --max 20
+```
+
+**Output format:** `{ url, jobs: [{ title, url }] }` — titles alternate between job titles and company names; parse pairs to extract `{title, company, url}`.
+
+**Rules:**
+- LinkedIn requires `--mode listing` (not `jd`)
+- Results are real-time (not cached like WebSearch)
+- Extract job title + company from alternating entries in the `jobs` array
+- Deduplicate against Levels 0–2 and scan-history.tsv
+
 **Execution Priority:**
 1. Level 0: Local Parser → companies with a configured `parser:` and existing script; build `local_parser_ok`
 2. Level 1: Playwright → `tracked_companies` with a `careers_url`, **except** `local_parser_ok`
 3. Level 2: API → `tracked_companies` with an `api:`, **except** `local_parser_ok`
-4. Level 3: WebSearch → all `search_queries` with `enabled: true`; discard hits from companies in `local_parser_ok`
+4. Level 3: WebSearch → all `search_queries` with `method: websearch` (default); discard hits from companies in `local_parser_ok`
+5. Level 3b: LinkedIn Playwright → all `search_queries` with `method: playwright`
 
 Levels are additive — they are executed in order, and results are merged and deduplicated. Companies in `local_parser_ok` **do not** go through Levels 1 or 2; in Level 3, they only contribute transversal discovery (other companies on the same portal).
 
